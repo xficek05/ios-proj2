@@ -29,6 +29,8 @@ void oxygen_proc(semaphores *semaphore, int *cnt, int *o_cnt, int time)
 	int id = ++(*o_cnt);
 	*cnt = *cnt + 1;
 
+
+
 	//correct print
 	printf("%d: O %d: started\n", *cnt, id);
 	
