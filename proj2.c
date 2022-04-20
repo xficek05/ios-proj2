@@ -45,6 +45,7 @@ void oxygen_proc(semaphores *semaphore, int *cnt, int *o_cnt, int time)
 	*cnt = *cnt + 1;
 
 	printf("%d: O %d: going to queue\n", *cnt, id);
+	
 	fflush(stdout);
 
 	sem_post(&(semaphore->mutex));
