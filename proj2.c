@@ -1,474 +1,354 @@
-//author: Timotej Halenar
-//xlogin: xhalen00
-//date: 28.4.2022
-
+/*******************************
+  Richard Ficek xficek05
+ *******************************/
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/mman.h>
-#include <sys/wait.h>
+#include <string.h>
 #include <unistd.h>
 #include <semaphore.h>
+#include <sys/wait.h>
+#include <sys/mman.h>
+#include <time.h>
 
-#define intSIZE sizeof(int)
 
-//semaphore struct
-//***********************
-typedef struct
-{
+FILE *fp = NULL;
+int *count;
+int *cntO;
+int *cntH;
+int *cntqueO;
+int *cntqueH;
+int *cntMol;
+int *allMolekus;
+int *barNum;
+int *barCount;
+int *molTimes;
+
+//struktra pro semafory použité v projektu
+typedef struct{
 	sem_t mutex;
-	sem_t queue_h;
-	sem_t queue_o;
+    sem_t queO;
+    sem_t queH;
+    sem_t mutex2;
+    sem_t barrier1;
+    sem_t barrier2;
 }semaphores;
-//***********************
 
-#define smphSIZE sizeof(semaphores)
+//kontrola vstupních argumentů zdali jsou čísla
+int jeCislo(char *cislo){
+    int i = 0;
+	while (cislo[i] != '\0') i++;
+	for (int j = 0; j < i; j++){
+		if (cislo[j] > 57 || cislo[j] < 48)
+			return 0;
+        }
+	return 1;
+}
+//tohle je na konci programu a čeká dokud děti neumřou
+void sleeping(int O, int H){
+	int i =0;
+    while (i < O+H){
+        wait(NULL);
+        i++;
+    } 
+}
+//čištění zavírání  semaforů, souboru a sdílených proměnných
+void cleanup(semaphores *semaphore){
+    sem_destroy(&(semaphore->mutex));
+	sem_destroy(&(semaphore->queO));
+	sem_destroy(&(semaphore->queH));
+	sem_destroy(&(semaphore->mutex2));
+	sem_destroy(&(semaphore->barrier1));
+	sem_destroy(&(semaphore->barrier2));
 
-//barrier struct
-//***********************
-typedef struct
-{
-	sem_t mutex;
-	sem_t turnstile1;
-	sem_t turnstile2;
-	int n;
-	int count;
-}barrier_t;
-//***********************
 
-#define brrSIZE sizeof(barrier_t)
+    munmap(semaphore, sizeof(semaphores));
+	munmap(count, sizeof(int));
+	munmap(cntO, sizeof(int));
+	munmap(cntH, sizeof(int));
+	munmap(cntMol, sizeof(int));
+	munmap(allMolekus, sizeof(int));
+    munmap(cntqueO, sizeof(int));
+	munmap(cntqueH, sizeof(int));
+	munmap(barNum, sizeof(int));
+	munmap(barCount, sizeof(int));
+    munmap(molTimes, sizeof(int));
 
-//atom counters
-//***********************
-typedef struct
-{
-	int o;
-	int h;
-}queue_t;
-//***********************
+	fclose(fp);
+}
+// zalložení sdílených proměnných
+void set_variables(){
+    count = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	cntO = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	cntH = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    cntqueO = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	cntqueH = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    cntMol = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	allMolekus = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    barNum = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	barCount = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    molTimes = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+}
+// funkce sloužicí k tisku
+void message(int id, char znak,int a){
+    if  (a == 1){
+        fprintf(fp,"%d: %c %d: started\n",*count,znak,id);
+        fflush(fp);
+    }
+    else if  (a == 2){
+        fprintf(fp,"%d: %c %d: going to queue\n",*count,znak,id);
+        fflush(fp);
+    }
+    else if (a == 3){
+        fprintf(fp, "%d: %c %d: not enough H\n", *count,znak, id);
+        fflush(fp);
+    }
+    else if (a == 4){
+        fprintf(fp, "%d: %c %d: creating molecule %d\n", *count,znak,id, *cntMol);
+        fflush(fp);
+    }
+    else if (a == 5){
+        fprintf(fp, "%d: %c %d: molecule %d created\n", *count, znak,id, *cntMol);
+        fflush(fp);
+    }
+    else if (a == 6){
+        fprintf(fp, "%d: %c %d: not enough O or H\n", *count, znak,id);
+        fflush(fp);
+    }
+}
+// pomocná pro vytvoření času k vytvoření molelkuly / atomu
+void waiting(int t){
+    if (t == 0){
+        t = 1;
+    }
+    usleep(rand()%t*1000);
+}
 
-#define qSIZE sizeof(queue_t)
+void odchyd(){
 
-//***********************
+}
 
-//proj2.out
-FILE *file;
+void barrier(semaphores *semaphore,int id, char znak){
+    //--- Barrier start
+    // inspirace z knížky https://greenteapress.com/semaphores/LittleBookOfSemaphores.pdf strana 40
+    sem_wait(&(semaphore->mutex2));
+        (*barCount) += 1;
+        if((*barCount) == (*barNum)) {
+            sem_wait(&(semaphore->barrier2));
+            sem_post(&(semaphore->barrier1));
+        }
+    sem_post(&(semaphore->mutex2));
 
-//process for oxygen
-//***********************
-void oxygen_proc(semaphores *semaphore, int *cnt, int *o_cnt, int time, int moltime, queue_t *queue, int *mol_cnt, int *mol_three, int *max_mols, barrier_t *barrier)
-{
-	srand(getpid());
-	//sleep time for atoms
-        int sleeptime = rand()%time*1000;
-	srand(getpid());
-	//sleeptime for molecules
-	int molsleeptime = rand()%moltime*1000;
+    sem_wait(&(semaphore->barrier1));
+    sem_post(&(semaphore->barrier1));
 
-	//wait for mutex token
-	sem_wait(&(semaphore->mutex));
-	
-	//identificator
-	int id = ++(*o_cnt);
-	*cnt = *cnt + 1;
+    *count+=1;	
+	message(id,znak,5);
 
-	fprintf(file, "%d: O %d: started\n", *cnt, id);
-	
-	sem_post(&(semaphore->mutex));
-	
-	//sleep, then go to queue	
-	usleep(sleeptime);
-
-	sem_wait(&(semaphore->mutex));
-	
-	*cnt = *cnt + 1;
-
-	fprintf(file, "%d: O %d: going to queue\n", *cnt, id);
-
-	//increment number of oxygens in queue
-	queue->o  = queue->o + 1;
-
-	//only make more molecules if they can be created
-	if (*mol_cnt <= *max_mols)
-	{
-	//if there are two hydrogens waiting, let them through
-	if (queue->h >= 2)
-	{
-		sem_post(&(semaphore->queue_h));
-		sem_post(&(semaphore->queue_h));
-		queue->h = queue->h - 2;
-		sem_post(&(semaphore->queue_o));
-		queue->o = queue->o - 1;
-
+    //tohle hlídá počet vypsaných created aby byly jen 3
+    *molTimes += 1;
+	if (*molTimes == *barNum){
+		*cntMol += 1;
+		*molTimes = 0;
 	}
-	//if not, move on
-	else
-	{
-		sem_post(&(semaphore->mutex));
-	}
+    //zde se odchytávají zbyle atomu co se nevlezou do molekuly
+    if (*cntMol > *allMolekus){
+		for (int i=0; i<*count; i++){
+			sem_post(&(semaphore->queO));
+			sem_post(&(semaphore->queH));
+		}
 	}
 
-	//waiting to be let through
-	sem_wait(&(semaphore->queue_o));
-	
-	*cnt = *cnt + 1;
+    sem_wait(&(semaphore->mutex2));
+    (*barCount) -= 1;
+    if((*barCount) == 0) {
+        sem_wait(&(semaphore->barrier1));
+        sem_post(&(semaphore->barrier2));
+    }
+    sem_post(&(semaphore->mutex2));
 
-	//if all molecules have been created already, signal semaphores and exit
-	if (*mol_cnt > *max_mols)
-	{
-		fprintf(file, "%d: O %d: not enough H\n", *cnt, id);
-		//printf("gOt here\n");
-		sem_post(&(semaphore->queue_o));
+    sem_wait(&(semaphore->barrier2));
+    sem_post(&(semaphore->barrier2));
+    //--- Barrier end
+}
+
+//proces klyslík
+void oxygenProcess(semaphores *semaphore,int TI,int TB){
+    //po spuštění výpis started
+    char znak = 'O';
+    int id = ++(*cntO);
+    *count+=1;
+    message(id,znak,1); //started
+    // následně čeká pomocí usleep náhodný čas v intervalu 0,TI, tvorba atomu
+    waiting(TI);
+    //výpis going to queue a zařadí se do fronty
+    sem_wait(&(semaphore->mutex));
+	*count+=1;
+	message(id,znak,2);
+    //přidání O do que
+    *cntqueO+=1;
+
+    if(*cntMol <= *allMolekus){
+        if (*cntqueH > 2){
+            sem_post(&(semaphore->queH));
+            sem_post(&(semaphore->queH));
+            *cntqueH -= 2;
+            sem_post(&(semaphore->queO));
+            *cntqueO -= 1;
+        }
+        else {
+            sem_post(&(semaphore->mutex));
+        }
+    }
+    
+    sem_wait(&(semaphore->queO));
+    //tisk a opatření not enough
+    *count+=1;
+    if (*cntMol > *allMolekus){      
+        message(id,znak,3);
+        sem_post(&(semaphore->queO));
 		sem_post(&(semaphore->mutex));
 		exit(0);
-	}
+    }
+    //tisk creating molecule
+    message(id,znak,4);
+    //čas pro tvorbu molekuly
+    waiting(TB);
+    
+    barrier(semaphore,id,znak); 
 
-	fprintf(file, "%d: O %d: creating molecule %d\n", *cnt, id, *mol_cnt);
-
-	//i don't know if this usleep does anything
-	usleep(molsleeptime);
-
-	//***barrier.wait start***
-	sem_wait(&(barrier->mutex));
-	barrier->count = barrier->count + 1;
-	if (barrier->count == barrier->n)
-	{
-		sem_wait(&(barrier->turnstile2));
-		sem_post(&(barrier->turnstile1));
-	}
-	sem_post(&(barrier->mutex));
-
-	sem_wait(&(barrier->turnstile1));
-	sem_post(&(barrier->turnstile1));
-
-	//***critical section start***
-
-	*cnt = *cnt + 1;	
-	fprintf(file, "%d: O %d: molecule %d created\n", *cnt, id, *mol_cnt);
-
-	//my elaborate molecule incrementing system, there's probably an easier way but this is what I've come up with
-	*mol_three = *mol_three + 1;
-
-	if (*mol_three == 3)
-	{
-		*mol_cnt = *mol_cnt + 1;
-		*mol_three = 0;
-	}
-
-	//if this was the last molecule, open semaphores to let all other atoms through
-	//these will get caught by a condition and killed
-	if (*mol_cnt > *max_mols)
-	{
-		for (int i=0; i<*cnt; i++)
-		{
-			sem_post(&(semaphore->queue_o));
-		}
-		for (int i=0; i<*cnt; i++)
-		{
-			sem_post(&(semaphore->queue_h));
-		}
-	}
-		
-	//***critical section end***
-	
-	sem_wait(&(barrier->mutex));
-	barrier->count = barrier->count - 1;
-	if (barrier->count == 0)
-	{
-		sem_wait(&(barrier->turnstile1));
-		sem_post(&(barrier->turnstile2));
-	}
-	sem_post(&(barrier->mutex));
-	
-	sem_wait(&(barrier->turnstile2));
-	sem_post(&(barrier->turnstile2));
-
-	///***barrier.wait end***
-
-	sem_post(&(semaphore->mutex));
-
+    sem_post(&(semaphore->mutex));
+    
 	exit(0);
 }
-//***********************
 
-//process for hydrogen
-//***********************
-void hydrogen_proc(semaphores *semaphore, int *cnt, int *h_cnt, int time, queue_t *queue, int *mol_cnt, int *mol_three, int *max_mols, barrier_t *barrier)
-{
-	//same as the oxygen function
-	srand(getpid());
-        int sleeptime = rand()%time*1000;
+void hydrogenProcess(semaphores *semaphore,int TI){
+    char znak = 'H';
 
-        sem_wait(&(semaphore->mutex));
+    int id = ++(*cntH);
+    *count+=1;
+    message(id,znak,1);
+    //tvorba atomu
+    waiting(TI);
+    
+	*count+=1;
+    sem_wait(&(semaphore->mutex));
+	message(id,znak,2);
+    *cntqueH+=1;
 
-        int id = ++(*h_cnt);
-        *cnt = *cnt + 1;
+    if(*cntMol <= *allMolekus){
+        if (*cntqueH >= 2 && *cntqueO >= 1){
+            sem_post(&(semaphore->queH));
+            sem_post(&(semaphore->queH));
+            *cntqueH -= 2;
+            sem_post(&(semaphore->queO));
+            *cntqueO -= 1;
+        }
+        else {
+            sem_post(&(semaphore->mutex));
+        }
+    }
 
-	fprintf(file, "%d: H %d: started\n", *cnt, id);
-
-        sem_post(&(semaphore->mutex));
-	
-	usleep(sleeptime);
-
-	sem_wait(&(semaphore->mutex));
-	
-	*cnt = *cnt + 1;
-
-	fprintf(file, "%d: H %d: going to queue\n", *cnt, id);
-
-	queue->h = queue->h + 1;
-
-	if (*mol_cnt <= *max_mols)
-	{
-	//similar to oxygen, but checking the oxygen queue as well,
-	//because we've just added another hydrogen, not oxygen
-	if (queue->h >= 2 && queue->o >= 1)
-	{
-		sem_post(&(semaphore->queue_h));
-		sem_post(&(semaphore->queue_h));
-		queue->h = queue->h - 2;
-		sem_post(&(semaphore->queue_o));
-		queue->o = queue->o - 1;
-	}
-	else
-	{
+    sem_wait(&(semaphore->queH));
+    *count+=1;
+    
+    if (*cntMol > *allMolekus){
+        message(id,znak,6);
 		sem_post(&(semaphore->mutex));
-	}
-	}
-
-	sem_wait(&(semaphore->queue_h));
-	*cnt = *cnt + 1;
-
-	if (*mol_cnt > *max_mols)
-	{
-		fprintf(file, "%d: H %d: not enough O or H\n", *cnt, id);
-		sem_post(&(semaphore->mutex));
-		sem_post(&(semaphore->queue_h));
+        sem_post(&(semaphore->queH));
 		exit(0);
-	}
+    }
 
-	fprintf(file, "%d: H %d: creating molecule %d\n", *cnt, id, *mol_cnt);
+    message(id,znak,4);
 
-	//***barrier.wait start***
-	sem_wait(&(barrier->mutex));
-	barrier->count = barrier->count + 1;
-	if (barrier->count == barrier->n)
-	{
-		sem_wait(&(barrier->turnstile2));
-		sem_post(&(barrier->turnstile1));
-	}
-	sem_post(&(barrier->mutex));
-
-	sem_wait(&(barrier->turnstile1));
-	sem_post(&(barrier->turnstile1));
-
-	//***critical section start***
-	
-	*cnt = *cnt + 1;
-	fprintf(file, "%d: H %d: molecule %d created\n", *cnt, id, *mol_cnt);
-
-	*mol_three = *mol_three + 1;
-
-	if (*mol_three == 3)
-	{
-		*mol_cnt = *mol_cnt + 1;
-		*mol_three = 0;
-	}
-	
-	if (*mol_cnt > *max_mols)
-	{
-		for (int i=0; i<*cnt; i++)
-		{
-			sem_post(&(semaphore->queue_o));
-		}
-		for (int i=0; i<*cnt; i++)
-		{
-			sem_post(&(semaphore->queue_h));
-		}
-	}
-		
-	//***critical section end***
-	
-	sem_wait(&(barrier->mutex));
-	barrier->count = barrier->count - 1;
-	if (barrier->count == 0)
-	{
-		sem_wait(&(barrier->turnstile1));
-		sem_post(&(barrier->turnstile2));
-	}
-	sem_post(&(barrier->mutex));
-	
-	sem_wait(&(barrier->turnstile2));
-	sem_post(&(barrier->turnstile2));
-
-	///***barrier.wait end***
-
-        exit(0);
-}
-//***********************
-
-//calculate how many molecules will be created
-//***********************
-int mol_count(int oxygen, int hydrogen)
-{
-	return ((2*oxygen) < hydrogen) ? oxygen : (hydrogen/2);
+    barrier(semaphore,id,znak);    
+	exit(0);
 }
 
-//main
-//***********************
-int main(int argc, char *argv[])
-{
 
-	//argument checking	
-	if (argc != 5)
-	{
-		fprintf(stderr, "Invalid arguments.\n");
-		return 1;
-	}
+int main(int argc, char **argv){
+    //ověření vstupu
+    int H;
+    int O;
+    int TI;
+    int TB;
+    if(argc == 5){
+        if (jeCislo(argv[1]) && jeCislo(argv[2]) && jeCislo(argv[3]) && jeCislo(argv[4])){
+            O = atoi(argv[1]);
+	        H = atoi(argv[2]);
+	        TI = atoi(argv[3]);
+	        TB = atoi(argv[4]);
+            if (!(0 <= TI && TI <= 1000) || !(0 <= TB && TB <= 1000) || O <= 0 || H <= 0 ){
+                fprintf(stderr,"Error: One of the out of range.\n");
+			    exit(1);
+            }
+        }
+        else{
+            fprintf(stderr,"Error: One of the arguments have wrong format.\n");
+			exit(1);
+        }
+    }
+    else{
+            fprintf(stderr, "Error: Too few or many arguments.\n");
+			exit(1);
+    }
 
-	if (atoi(argv[3]) > 1000)
-	{
-		fprintf(stderr, "Time argument out of range.\n");
-		return 1;
-	}
-	
-	if (atoi(argv[4]) > 1000)
-	{
-		fprintf(stderr, "Time argument out of range.\n");
-		return 1;
-	}
-
-	//arguments parsing
-	int oxygen;
-	oxygen = atoi(argv[1]);
-
-	int hydrogen;
-	hydrogen = atoi(argv[2]);
-
-	int atom_time;
-	atom_time = atoi(argv[3]);
-
-	int molecule_time;
-	molecule_time = atoi(argv[4]);
-
-	//opening file
-	if ((file = fopen("proj2.out", "w")) == NULL)
+    if ((fp = fopen("proj2.out", "w")) == NULL)
 	{
 		fprintf(stderr, "Unable to open file.\n");
 		return 1;
 	}
-
-	setbuf(file, NULL);
+	setbuf(fp, NULL);
 	setbuf(stderr, NULL);
 
-	//shared variables
-	//action counter
-	int *cnt;
-	cnt = mmap(NULL, intSIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-	*cnt = 0;
-	
-	//oxygen counter
-	int *o_cnt;
-	o_cnt = mmap(NULL, intSIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-	*o_cnt = 0;
+    //shared variable
+    set_variables();
+    //set shared variable
+	*count = 0;
+    *cntO = 0;
+    *cntH = 0;
+    *cntqueO = 0;
+    *cntqueH = 0;
+    *cntMol = 1;
+    *allMolekus = H / 2;
+    *barNum = 3;
+    *barCount = 0;
+    *molTimes = 0;
 
-	//hydrogen counter
-	int *h_cnt;
-	h_cnt = mmap(NULL, intSIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-	*h_cnt = 0;
-
-	//molecule counter
-	int *mol_cnt;
-	mol_cnt = mmap(NULL, intSIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-	*mol_cnt = 1;
-
-	//additional variable to accurately index molecules
-	int *mol_three;
-	mol_three = mmap(NULL, intSIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-	*mol_three = 0;
-
-	//number of molecules to be created
-	int *max_mols;
-	max_mols = mmap(NULL, intSIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-	*max_mols = mol_count(oxygen, hydrogen);
-
-	//number of O and H atoms in queue
-	queue_t *queue;
-	queue = mmap(NULL, qSIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-	queue->o = 0;
-	queue->h = 0;
-
-	//semaphores
-	semaphores *semaphore;
-	semaphore = mmap(NULL, smphSIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-	sem_init(&(semaphore->mutex), 1, 1);
-	sem_init(&(semaphore->queue_o), 1, 0);
-	sem_init(&(semaphore->queue_h), 1, 0);
-
-	//barrier
-	barrier_t *barrier;
-	barrier = mmap(NULL, brrSIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-	sem_init(&(barrier->mutex), 1, 1);
-	sem_init(&(barrier->turnstile1), 1, 0);
-	sem_init(&(barrier->turnstile2), 1, 1);
-	barrier->n = 3;
-	barrier->count = 0;
-
+	// semaphores
+    semaphores *semaphore;
+    semaphore = mmap(NULL, sizeof(semaphores), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	if (sem_init(&(semaphore->mutex), 1, 1) == -1 ||
+	    sem_init(&(semaphore->queO), 1, 0) == -1 ||
+	    sem_init(&(semaphore->queH), 1, 0) == -1 ||
+        sem_init(&(semaphore->mutex2), 1, 1) == -1 ||
+	    sem_init(&(semaphore->barrier1), 1, 0) == -1 ||
+	    sem_init(&(semaphore->barrier2), 1, 1)== -1 ){
+            fprintf(stderr, "error: Semaphore initialization failed.\n");
+            exit(1);
+    }
+    	
 	pid_t pid = getpid();
-
-	//creating oxygen processes
-	for (int i=0; i<oxygen; i++)
-	{
-		if (pid != 0)
-		{
+    for (int i=0; i<O; i++){
+		if (pid != 0){
 			pid = fork();
 		}
-		if (pid == 0)
-		{
-			oxygen_proc(semaphore, cnt, o_cnt, atom_time, molecule_time, queue, mol_cnt, mol_three, max_mols, barrier);
+		if (pid == 0){
+            oxygenProcess(semaphore,TI,TB);
 		}
 	}
-
-	pid = getpid();
-	
-	//creating hydrogen processes
-	for (int i=0; i<hydrogen; i++)
-        {
-                if (pid != 0)
-                {
-                        pid = fork();
-                }
-                if (pid == 0)
-                {
-                        hydrogen_proc(semaphore, cnt, h_cnt, atom_time, queue, mol_cnt, mol_three, max_mols,  barrier);
-                }
-        }
-
-	//waiting for children to die
-	for (int i=0; i<hydrogen+oxygen; i++)
-	{
-		wait(NULL);
+    
+    pid = getpid();
+	for (int i=0; i<H; i++){
+		if (pid != 0){
+			pid = fork();
+		}
+		if (pid == 0){
+			hydrogenProcess(semaphore,TI);
+		}
 	}
+	
+	sleeping(O,H);
+	cleanup(semaphore);
 
-	//cleanup	
-	sem_destroy(&(semaphore->mutex));
-	sem_destroy(&(semaphore->queue_o));
-	sem_destroy(&(semaphore->queue_h));
-	sem_destroy(&(barrier->mutex));
-	sem_destroy(&(barrier->turnstile1));
-	sem_destroy(&(barrier->turnstile2));
-
-	munmap(cnt, intSIZE);
-	munmap(o_cnt, intSIZE);
-	munmap(h_cnt, intSIZE);
-	munmap(mol_cnt, intSIZE);
-	munmap(mol_three, intSIZE);
-	munmap(max_mols, intSIZE);
-	munmap(queue, qSIZE);
-	munmap(semaphore, smphSIZE);
-	munmap(barrier, brrSIZE);
-
-	fclose(file);
-
-	return 0;
+    return 0;
 }
-//***********************
